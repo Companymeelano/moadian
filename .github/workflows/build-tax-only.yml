@@ -41,7 +41,7 @@ jobs:
         run: |
           set +e
           echo "=== Building Debug ==="
-          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxDebug 2>&1 | tail -30
+          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxDebug 2>&1
           echo "exit_debug=${PIPESTATUS[0]}"
           echo ""
           echo "=== Building Release ==="
@@ -50,11 +50,15 @@ jobs:
             -Pandroid.injected.signing.store.password="derakhshan-install" \
             -Pandroid.injected.signing.key.alias="meelano" \
             -Pandroid.injected.signing.key.password="derakhshan-install" \
-            2>&1 | tail -30
+            2>&1
           echo "exit_release=${PIPESTATUS[0]}"
           echo ""
           echo "=== Final APKs ==="
-          find app/build/outputs/apk -name "*.apk" -ls
+          find app/build/outputs/apk -name "*.apk" -ls 2>&1
+          if [ ! -f app/build/outputs/apk/tax/release/app-tax-release.apk ]; then
+            echo "::error::Release APK not found!"
+            exit 1
+          fi
           exit 0
 
       - name: Copy APKs to a known location
