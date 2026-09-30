@@ -36,70 +36,59 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build Tax Debug APK
+      - name: Build Tax APK (debug + release)
         working-directory: extracted/MEELANO-Android
         run: |
           set +e
-          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxDebug 2>&1 | tail -50
-          echo "exit_status=${PIPESTATUS[0]}"
-          exit 0
-
-      - name: Build Tax Release APK (signed with install key)
-        working-directory: extracted/MEELANO-Android
-        run: |
-          set +e
+          echo "=== Building Debug ==="
+          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxDebug 2>&1 | tail -30
+          echo "exit_debug=${PIPESTATUS[0]}"
+          echo ""
+          echo "=== Building Release ==="
           gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxRelease \
             -Pandroid.injected.signing.store.file="$PWD/app/signing/meelano-install.p12" \
             -Pandroid.injected.signing.store.password="derakhshan-install" \
             -Pandroid.injected.signing.key.alias="meelano" \
             -Pandroid.injected.signing.key.password="derakhshan-install" \
-            2>&1 | tail -50
-          echo "exit_status=${PIPESTATUS[0]}"
+            2>&1 | tail -30
+          echo "exit_release=${PIPESTATUS[0]}"
+          echo ""
+          echo "=== Final APKs ==="
+          find app/build/outputs/apk -name "*.apk" -ls
           exit 0
 
-      - name: Verify APKs were built
+      - name: Copy APKs to a known location
         run: |
           set +e
-          echo "=== APK files ==="
-          find extracted/MEELANO-Android/app/build/outputs/apk -name "*.apk" -ls
-          echo ""
-          echo "=== Verify release signature ==="
-          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
-          for f in extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk; do
-            echo "Verifying: $f"
-            "$APKSIGNER" verify --verbose --print-certs "$f" | head -10
-          done
+          mkdir -p /tmp/tax-apks
+          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk /tmp/tax-apks/MEELANO-Tax-v6.0.1-release.apk 2>&1
+          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk /tmp/tax-apks/MEELANO-Tax-v6.0.1-debug.apk 2>&1
+          ls -la /tmp/tax-apks
           exit 0
 
-      - name: Upload APKs as artifact
+      - name: Upload APKs as artifact (1)
         uses: actions/upload-artifact@v4
         with:
-          name: MEELANO-Tax-APK-v6.0.1
-          path: |
-            extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk
-            extracted/MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk
+          name: MEELANO-Tax-v6.0.1-release
+          path: /tmp/tax-apks/MEELANO-Tax-v6.0.1-release.apk
           retention-days: 30
+          if-no-files-found: error
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload APKs as artifact (2)
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: tax-v6.0.1-build-${{ github.run_number }}
-          name: MEELANO Tax v6.0.1 (build ${{ github.run_number }})
-          target_commitish: ${{ github.sha }}
-          prerelease: true
-          files: |
-            extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk
-            extracted/MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: MEELANO-Tax-v6.0.1-debug
+          path: /tmp/tax-apks/MEELANO-Tax-v6.0.1-debug.apk
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Commit APKs to branch
         if: github.event_name == 'push'
         run: |
           set +e
           mkdir -p apk
-          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk apk/MEELANO-Tax-v6.0.1-release.apk
-          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk apk/MEELANO-Tax-v6.0.1-debug.apk
+          cp /tmp/tax-apks/MEELANO-Tax-v6.0.1-release.apk apk/ 2>&1
+          cp /tmp/tax-apks/MEELANO-Tax-v6.0.1-debug.apk apk/ 2>&1
           printf '{"versionCode": 108, "versionName": "6.0.1", "url": "https://github.com/%s/raw/%s/apk/MEELANO-Tax-v6.0.1-release.apk"}\n' \
             "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > apk/latest-tax.json
           ls -la apk/
@@ -113,3 +102,16 @@ jobs:
             sleep 5
           done
           exit 0
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tax-v6.0.1-build-${{ github.run_number }}
+          name: MEELANO Tax v6.0.1 (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: |
+            /tmp/tax-apks/MEELANO-Tax-v6.0.1-release.apk
+            /tmp/tax-apks/MEELANO-Tax-v6.0.1-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
