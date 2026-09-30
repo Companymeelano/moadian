@@ -1,23 +1,9 @@
 name: Build Tax APK Only
 
-# این workflow فقط APK نسخه مودیان (Tax) را می‌سازد.
-# سریع‌تر از workflow کامل است (build-apk.yml).
-
 on:
   push:
     branches: ['arena/**', 'main']
   workflow_dispatch:
-    inputs:
-      flavor:
-        description: 'Flavor to build'
-        required: false
-        default: 'tax'
-        type: choice
-        options:
-          - tax
-          - store
-          - staff
-          - visitor
 
 permissions:
   contents: write
@@ -30,183 +16,93 @@ jobs:
   build-tax:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      HAS_SIGNING_KEY: ${{ secrets.MEELANO_KEYSTORE_BASE64 != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Locate Android source
-        id: src
+      - name: List repo contents
         run: |
-          set +e  # allow commands to fail without exiting
-          echo "=== Current working directory ==="
-          pwd
-          echo "=== Top-level contents ==="
+          echo "=== Top-level ==="
           ls -la
-          echo "=== Looking for Android source ==="
+          echo ""
+          echo "=== extracted/ ==="
+          ls -la extracted/ 2>&1 || echo "no extracted/"
+          echo ""
+          echo "=== extracted/MEELANO-Android/ ==="
+          ls -la extracted/MEELANO-Android/ 2>&1 || echo "no extracted/MEELANO-Android/"
+          echo ""
+          echo "=== extracted/MEELANO-Android/app/ ==="
+          ls -la extracted/MEELANO-Android/app/ 2>&1 || echo "no app/"
 
-          PROJECT_DIR=""
-
-          # Try 1: a fresh zip uploaded alongside the workflow source.
-          ZIP=$(ls MEELANO-Android-*.zip 2>/dev/null | head -1 || true)
-          if [ -n "$ZIP" ]; then
-            echo "Found uploaded zip: $ZIP"
-            rm -rf MEELANO-Android
-            unzip -q -o "$ZIP"
-            PROJECT_DIR="MEELANO-Android"
-          fi
-
-          # Try 2: source kept inside extracted/MEELANO-Android/ (this repo).
-          if [ -z "$PROJECT_DIR" ] && [ -d "extracted/MEELANO-Android/app" ]; then
-            echo "Found extracted/MEELANO-Android/app"
-            PROJECT_DIR="extracted/MEELANO-Android"
-          fi
-
-          # Try 3: source at repo root in MEELANO-Android/.
-          if [ -z "$PROJECT_DIR" ] && [ -d "MEELANO-Android/app" ]; then
-            echo "Found MEELANO-Android/app"
-            PROJECT_DIR="MEELANO-Android"
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::No Android source found!"
-            echo "Looked for:"
-            echo "  - MEELANO-Android-*.zip in repo root"
-            echo "  - extracted/MEELANO-Android/app"
-            echo "  - MEELANO-Android/app"
-            echo "Directory listing:"
-            find . -maxdepth 3 -type d | head -50
-            exit 1
-          fi
-
-          echo "Using PROJECT_DIR=$PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
-            echo "::error::$PROJECT_DIR/app/build.gradle not found!"
-            ls -la "$PROJECT_DIR" || true
-            exit 1
-          fi
-
-          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" "$PROJECT_DIR/app/build.gradle" || echo "0.0.0")
-          CODE=$(grep -oP "versionCode\s+\K[0-9]+" "$PROJECT_DIR/app/build.gradle" || echo "0")
-          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "✅ Building version $VERSION ($CODE) from $PROJECT_DIR"
-
-      - uses: actions/setup-java@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
         with:
           packages: 'platforms;android-36 build-tools;36.0.0'
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Prepare signing key
-        env:
-          KS_B64: ${{ secrets.MEELANO_KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.MEELANO_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.MEELANO_KEY_ALIAS }}
-          KEY_PASS: ${{ secrets.MEELANO_KEY_PASSWORD }}
+      - name: Get version info
+        id: version
         run: |
-          KS="$RUNNER_TEMP/release.jks"
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$KS"
-            echo "SIGN_STORE_PASS=$KS_PASS" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_ALIAS=${KEY_ALIAS:-meelano}" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASS=${KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
-            echo "✅ Signed with repository release key"
-          else
-            # استفاده از کلید پیش‌فرض (derakhshan-install)
-            if [ -f "$PROJECT_DIR/app/signing/meelano-install.p12" ]; then
-              cp "$PROJECT_DIR/app/signing/meelano-install.p12" "$KS"
-              echo "SIGN_STORE_PASS=derakhshan-install" >> "$GITHUB_ENV"
-              echo "SIGN_KEY_ALIAS=meelano" >> "$GITHUB_ENV"
-              echo "SIGN_KEY_PASS=derakhshan-install" >> "$GITHUB_ENV"
-              echo "✅ Signed with fixed install key"
-            else
-              echo "❌ ERROR: No signing key available!"
-              echo "Either set MEELANO_KEYSTORE_BASE64 secret, or add a key at $PROJECT_DIR/app/signing/meelano-install.p12"
-              exit 1
-            fi
-          fi
-          echo "SIGN_STORE_FILE=$KS" >> "$GITHUB_ENV"
+          PROJECT_DIR=extracted/MEELANO-Android
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" "$PROJECT_DIR/app/build.gradle")
+          CODE=$(grep -oP "versionCode\s+\K[0-9]+" "$PROJECT_DIR/app/build.gradle")
+          echo "VERSION=$VERSION"
+          echo "CODE=$CODE"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build Tax Debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: extracted/MEELANO-Android
         run: |
-          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g \
-            :app:assembleTaxDebug 2>&1 | tee "$RUNNER_TEMP/gradle-debug.log"
-          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxDebug 2>&1 | tail -50
 
-      - name: Report debug errors
-        if: env.exit != 0
-        run: |
-          echo "❌ Build failed. Errors:"
-          grep -E "error:|\.java:[0-9]+" "$RUNNER_TEMP/gradle-debug.log" | head -30
-          echo "---"
-          echo "Full log saved in: $RUNNER_TEMP/gradle-debug.log"
-
-      - name: Build Tax Release APK
-        if: env.exit == 0
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Build Tax Release APK (signed with install key)
+        working-directory: extracted/MEELANO-Android
         run: |
           gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxRelease \
-            -Pandroid.injected.signing.store.file="$SIGN_STORE_FILE" \
-            -Pandroid.injected.signing.store.password="$SIGN_STORE_PASS" \
-            -Pandroid.injected.signing.key.alias="$SIGN_KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$SIGN_KEY_PASS" \
-            2>&1 | tee "$RUNNER_TEMP/gradle-release.log"
+            -Pandroid.injected.signing.store.file="$PWD/app/signing/meelano-install.p12" \
+            -Pandroid.injected.signing.store.password="derakhshan-install" \
+            -Pandroid.injected.signing.key.alias="meelano" \
+            -Pandroid.injected.signing.key.password="derakhshan-install" \
+            2>&1 | tail -50
 
-      - name: Collect and verify APKs
-        if: env.exit == 0
+      - name: Collect APKs
         run: |
-          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
           mkdir -p out
-          cp "$PROJECT_DIR/app/build/outputs/apk/tax/release/"*.apk \
-             "out/MEELANO-Tax-v$APP_VERSION-release.apk"
-          cp "$PROJECT_DIR/app/build/outputs/apk/tax/debug/"*.apk \
-             "out/MEELANO-Tax-v$APP_VERSION-debug.apk"
-
-          for f in out/*.apk; do
-            R=$("$APKSIGNER" verify --verbose --print-certs "$f" | grep -E "Verified using v[23] |certificate SHA-256" | tr '\n' ';')
-            echo "::notice title=apksigner $(basename "$f")::$R"
-          done
-
-          rm -f "$SIGN_STORE_FILE"
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" extracted/MEELANO-Android/app/build.gradle)
+          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/release/*.apk "out/MEELANO-Tax-v$VERSION-release.apk"
+          cp extracted/MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk "out/MEELANO-Tax-v$VERSION-debug.apk"
           ls -la out
 
       - uses: actions/upload-artifact@v4
-        if: env.exit == 0
         with:
-          name: MEELANO-Tax-APK-v${{ env.APP_VERSION }}
+          name: MEELANO-Tax-APK
           path: out/*.apk
           retention-days: 14
 
       - name: Commit APK to branch
-        if: env.exit == 0 && github.event_name == 'push'
+        if: github.event_name == 'push'
         run: |
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" extracted/MEELANO-Android/app/build.gradle)
+          CODE=$(grep -oP "versionCode\s+\K[0-9]+" extracted/MEELANO-Android/app/build.gradle)
           mkdir -p apk
-          cp out/MEELANO-Tax-v$APP_VERSION-release.apk apk/
-          cp out/MEELANO-Tax-v$APP_VERSION-debug.apk apk/
-
-          # Update latest-tax.json for the "Settings → Update" feature.
+          cp out/MEELANO-Tax-v$VERSION-release.apk apk/
+          cp out/MEELANO-Tax-v$VERSION-debug.apk apk/
           printf '{"versionCode": %s, "versionName": "%s", "url": "https://github.com/%s/raw/%s/apk/MEELANO-Tax-v%s-release.apk"}\n' \
-            "$APP_CODE" "$APP_VERSION" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$APP_VERSION" > apk/latest-tax.json
-          cat apk/latest-tax.json
-
+            "$CODE" "$VERSION" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$VERSION" > apk/latest-tax.json
           git config user.name "github-actions[bot]"
           git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
-          git add apk/MEELANO-Tax-v$APP_VERSION-release.apk \
-                  apk/MEELANO-Tax-v$APP_VERSION-debug.apk \
-                  apk/latest-tax.json
-          git commit -m "Build Tax APK v$APP_VERSION [skip ci]" || echo "No changes to commit"
+          git add apk/MEELANO-Tax-v$VERSION-release.apk apk/MEELANO-Tax-v$VERSION-debug.apk apk/latest-tax.json
+          git commit -m "Build Tax APK v$VERSION [skip ci]" || echo "No changes"
           for i in 1 2 3; do
             git pull --rebase origin "${GITHUB_REF_NAME}" && \
               git push origin HEAD:${GITHUB_REF_NAME} && break
@@ -214,33 +110,12 @@ jobs:
           done
 
       - name: Publish GitHub Release
-        if: env.exit == 0
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: tax-v${{ env.APP_VERSION }}-build-${{ github.run_number }}
-          name: MEELANO Tax v${{ env.APP_VERSION }} (build ${{ github.run_number }})
+          tag_name: tax-v${{ steps.version.outputs.version }}-build-${{ github.run_number }}
+          name: MEELANO Tax v${{ steps.version.outputs.version }} (build ${{ github.run_number }})
           target_commitish: ${{ github.sha }}
           prerelease: true
-          files: |
-              out/MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk
-              out/MEELANO-Tax-v${{ env.APP_VERSION }}-debug.apk
-          body: |
-            ## APK های ساخته‌شده
-
-            - **نسخه اصلی** (signed): `MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk`
-            - **نسخه دیباگ** (debug): `MEELANO-Tax-v${{ env.APP_VERSION }}-debug.apk`
-
-            ### ویژگی‌های نسخه
-
-            - آیکن جدید مودیان (سند طلایی با مهر VAT روی زمینه سبز)
-            - نام برنامه: **مودیان**
-            - سیستم کد مالیاتی کالا (Tax Code Engine)
-            - اعتبارسنجی و تست خودکار
-
-            ### لینک مستقیم
-
-            پس از پایان build، فایل‌ها در پوشه `apk/` این شاخه قرار می‌گیرند:
-
-            ```
-            https://github.com/${{ github.repository }}/raw/${{ github.ref_name }}/apk/MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk
-            ```
+          files: out/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
