@@ -1,0 +1,194 @@
+name: Build Tax APK Only
+
+# این workflow فقط APK نسخه مودیان (Tax) را می‌سازد.
+# سریع‌تر از workflow کامل است (build-apk.yml).
+
+on:
+  push:
+    branches: ['arena/**', 'main']
+    paths:
+      - 'MEELANO-Android/app/src/tax/**'
+      - 'MEELANO-Android/app/src/main/java/ir/meelano/android/MeelanoTax*.java'
+      - '.github/workflows/build-tax-only.yml'
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: 'Flavor to build'
+        required: false
+        default: 'tax'
+        type: choice
+        options:
+          - tax
+          - store
+          - staff
+          - visitor
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-tax-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-tax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.MEELANO_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Android source
+        id: src
+        run: |
+          ZIP=$(ls MEELANO-Android-*.zip 2>/dev/null | head -1 || true)
+          if [ -n "$ZIP" ]; then
+            echo "Using uploaded zip: $ZIP"; rm -rf MEELANO-Android; unzip -q -o "$ZIP"
+          fi
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" MEELANO-Android/app/build.gradle)
+          CODE=$(grep -oP "versionCode\s+\K[0-9]+" MEELANO-Android/app/build.gradle)
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION ($CODE)"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.MEELANO_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.MEELANO_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MEELANO_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.MEELANO_KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/release.jks"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$KS"
+            echo "SIGN_STORE_PASS=$KS_PASS" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_ALIAS=${KEY_ALIAS:-meelano}" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_PASS=${KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+            echo "✅ Signed with repository release key"
+          else
+            # استفاده از کلید پیش‌فرض (derakhshan-install)
+            cp MEELANO-Android/app/signing/meelano-install.p12 "$KS"
+            echo "SIGN_STORE_PASS=derakhshan-install" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_ALIAS=meelano" >> "$GITHUB_ENV"
+            echo "SIGN_KEY_PASS=derakhshan-install" >> "$GITHUB_ENV"
+            echo "✅ Signed with fixed install key"
+          fi
+          echo "SIGN_STORE_FILE=$KS" >> "$GITHUB_ENV"
+
+      - name: Build Tax Debug APK
+        working-directory: MEELANO-Android
+        run: |
+          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g \
+            :app:assembleTaxDebug 2>&1 | tee "$RUNNER_TEMP/gradle-debug.log"
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Report debug errors
+        if: env.exit != 0
+        run: |
+          grep -E "error:|\.java:[0-9]+" "$RUNNER_TEMP/gradle-debug.log" | head -20 | while IFS= read -r line; do
+            echo "::error title=Compile::${line}"
+          done
+
+      - name: Build Tax Release APK
+        if: env.exit == 0
+        working-directory: MEELANO-Android
+        run: |
+          gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxRelease \
+            -Pandroid.injected.signing.store.file="$SIGN_STORE_FILE" \
+            -Pandroid.injected.signing.store.password="$SIGN_STORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$SIGN_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$SIGN_KEY_PASS" \
+            2>&1 | tee "$RUNNER_TEMP/gradle-release.log"
+
+      - name: Collect and verify APKs
+        run: |
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          mkdir -p out
+          cp MEELANO-Android/app/build/outputs/apk/tax/release/*.apk \
+             "out/MEELANO-Tax-v$APP_VERSION-release.apk"
+          cp MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk \
+             "out/MEELANO-Tax-v$APP_VERSION-debug.apk"
+
+          for f in out/*.apk; do
+            R=$("$APKSIGNER" verify --verbose --print-certs "$f" | grep -E "Verified using v[23] |certificate SHA-256" | tr '\n' ';')
+            echo "::notice title=apksigner $(basename "$f")::$R"
+          done
+
+          rm -f "$SIGN_STORE_FILE"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MEELANO-Tax-APK-v${{ env.APP_VERSION }}
+          path: out/*.apk
+          retention-days: 14
+
+      - name: Commit APK to branch
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p apk
+          cp out/MEELANO-Tax-v$APP_VERSION-release.apk apk/
+          cp out/MEELANO-Tax-v$APP_VERSION-debug.apk apk/
+
+          # Update latest-tax.json for the "Settings → Update" feature.
+          printf '{"versionCode": %s, "versionName": "%s", "url": "https://github.com/%s/raw/%s/apk/MEELANO-Tax-v%s-release.apk"}\n' \
+            "$APP_CODE" "$APP_VERSION" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$APP_VERSION" > apk/latest-tax.json
+          cat apk/latest-tax.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git add apk/MEELANO-Tax-v$APP_VERSION-release.apk \
+                  apk/MEELANO-Tax-v$APP_VERSION-debug.apk \
+                  apk/latest-tax.json
+          git commit -m "Build Tax APK v$APP_VERSION [skip ci]" || echo "No changes"
+          for i in 1 2 3; do
+            git pull --rebase origin "${GITHUB_REF_NAME}" && \
+              git push origin HEAD:${GITHUB_REF_NAME} && break
+            sleep 5
+          done
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: tax-v${{ env.APP_VERSION }}-build-${{ github.run_number }}
+          name: MEELANO Tax v${{ env.APP_VERSION }} (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          files: |
+              out/MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk
+              out/MEELANO-Tax-v${{ env.APP_VERSION }}-debug.apk
+          body: |
+            ## APK های ساخته‌شده
+
+            - **نسخه اصلی** (signed): `MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk`
+            - **نسخه دیباگ** (debug): `MEELANO-Tax-v${{ env.APP_VERSION }}-debug.apk`
+
+            ### ویژگی‌های نسخه
+
+            - آیکن جدید مودیان (سند طلایی با مهر VAT روی زمینه سبز)
+            - نام برنامه: **مودیان**
+            - سیستم کد مالیاتی کالا (Tax Code Engine)
+            - اعتبارسنجی و تست خودکار
+
+            ### لینک مستقیم
+
+            پس از پایان build، فایل‌ها در پوشه `apk/` این شاخه قرار می‌گیرند:
+
+            ```
+            https://github.com/${{ github.repository }}/raw/${{ github.ref_name }}/apk/MEELANO-Tax-v${{ env.APP_VERSION }}-release.apk
+            ```
