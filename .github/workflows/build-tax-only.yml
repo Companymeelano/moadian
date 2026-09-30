@@ -53,15 +53,23 @@ jobs:
       - name: Get version info
         id: version
         run: |
-          echo "=== build.gradle contents ==="
-          cat extracted/MEELANO-Android/app/build.gradle
-          echo "==="
-          echo ""
-          VERSION="6.0.1"
-          CODE="108"
-          echo "Using VERSION=$VERSION CODE=$CODE"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "=== Step started ==="
+          pwd
+          ls -la extracted/MEELANO-Android/app/ | head -3
+          echo "=== Reading build.gradle ==="
+          if [ -f "extracted/MEELANO-Android/app/build.gradle" ]; then
+            echo "build.gradle exists"
+            head -20 extracted/MEELANO-Android/app/build.gradle
+          else
+            echo "::error::build.gradle not found"
+            exit 1
+          fi
+          echo "=== Hard-coding values ==="
+          echo "VERSION=6.0.1"
+          echo "CODE=108"
+          echo "version=6.0.1" >> "$GITHUB_OUTPUT"
+          echo "code=108" >> "$GITHUB_OUTPUT"
+          echo "=== Step complete ==="
 
       - name: Build Tax Debug APK
         working-directory: extracted/MEELANO-Android
