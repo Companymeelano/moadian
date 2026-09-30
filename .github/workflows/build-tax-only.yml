@@ -6,10 +6,6 @@ name: Build Tax APK Only
 on:
   push:
     branches: ['arena/**', 'main']
-    paths:
-      - 'MEELANO-Android/app/src/tax/**'
-      - 'MEELANO-Android/app/src/main/java/ir/meelano/android/MeelanoTax*.java'
-      - '.github/workflows/build-tax-only.yml'
   workflow_dispatch:
     inputs:
       flavor:
@@ -42,16 +38,37 @@ jobs:
       - name: Locate Android source
         id: src
         run: |
+          # این repository کد منبع را در پوشه extracted/MEELANO-Android/ نگه می‌دارد.
+          # ابتدا بررسی می‌کنیم آیا فایل ZIP جداگانه‌ای برای استفاده وجود دارد.
           ZIP=$(ls MEELANO-Android-*.zip 2>/dev/null | head -1 || true)
           if [ -n "$ZIP" ]; then
-            echo "Using uploaded zip: $ZIP"; rm -rf MEELANO-Android; unzip -q -o "$ZIP"
+            echo "Using uploaded zip: $ZIP"
+            rm -rf MEELANO-Android
+            unzip -q -o "$ZIP"
+            PROJECT_DIR="MEELANO-Android"
+          elif [ -d "extracted/MEELANO-Android" ]; then
+            echo "Using extracted/MEELANO-Android/ from the repo"
+            PROJECT_DIR="extracted/MEELANO-Android"
+          elif [ -d "MEELANO-Android" ]; then
+            echo "Using MEELANO-Android/ from the repo"
+            PROJECT_DIR="MEELANO-Android"
+          else
+            echo "❌ ERROR: No Android source found!"
+            echo "Expected one of:"
+            echo "  - MEELANO-Android-*.zip in repo root"
+            echo "  - extracted/MEELANO-Android/"
+            echo "  - MEELANO-Android/"
+            ls -la
+            exit 1
           fi
-          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" MEELANO-Android/app/build.gradle)
-          CODE=$(grep -oP "versionCode\s+\K[0-9]+" MEELANO-Android/app/build.gradle)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" "$PROJECT_DIR/app/build.gradle")
+          CODE=$(grep -oP "versionCode\s+\K[0-9]+" "$PROJECT_DIR/app/build.gradle")
           echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version $VERSION ($CODE)"
+          echo "✅ Building version $VERSION ($CODE) from $PROJECT_DIR"
 
       - uses: actions/setup-java@v4
         with:
@@ -82,16 +99,22 @@ jobs:
             echo "✅ Signed with repository release key"
           else
             # استفاده از کلید پیش‌فرض (derakhshan-install)
-            cp MEELANO-Android/app/signing/meelano-install.p12 "$KS"
-            echo "SIGN_STORE_PASS=derakhshan-install" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_ALIAS=meelano" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASS=derakhshan-install" >> "$GITHUB_ENV"
-            echo "✅ Signed with fixed install key"
+            if [ -f "$PROJECT_DIR/app/signing/meelano-install.p12" ]; then
+              cp "$PROJECT_DIR/app/signing/meelano-install.p12" "$KS"
+              echo "SIGN_STORE_PASS=derakhshan-install" >> "$GITHUB_ENV"
+              echo "SIGN_KEY_ALIAS=meelano" >> "$GITHUB_ENV"
+              echo "SIGN_KEY_PASS=derakhshan-install" >> "$GITHUB_ENV"
+              echo "✅ Signed with fixed install key"
+            else
+              echo "❌ ERROR: No signing key available!"
+              echo "Either set MEELANO_KEYSTORE_BASE64 secret, or add a key at $PROJECT_DIR/app/signing/meelano-install.p12"
+              exit 1
+            fi
           fi
           echo "SIGN_STORE_FILE=$KS" >> "$GITHUB_ENV"
 
       - name: Build Tax Debug APK
-        working-directory: MEELANO-Android
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g \
             :app:assembleTaxDebug 2>&1 | tee "$RUNNER_TEMP/gradle-debug.log"
@@ -100,13 +123,14 @@ jobs:
       - name: Report debug errors
         if: env.exit != 0
         run: |
-          grep -E "error:|\.java:[0-9]+" "$RUNNER_TEMP/gradle-debug.log" | head -20 | while IFS= read -r line; do
-            echo "::error title=Compile::${line}"
-          done
+          echo "❌ Build failed. Errors:"
+          grep -E "error:|\.java:[0-9]+" "$RUNNER_TEMP/gradle-debug.log" | head -30
+          echo "---"
+          echo "Full log saved in: $RUNNER_TEMP/gradle-debug.log"
 
       - name: Build Tax Release APK
         if: env.exit == 0
-        working-directory: MEELANO-Android
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           gradle --no-daemon -Dorg.gradle.jvmargs=-Xmx4g :app:assembleTaxRelease \
             -Pandroid.injected.signing.store.file="$SIGN_STORE_FILE" \
@@ -116,12 +140,13 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/gradle-release.log"
 
       - name: Collect and verify APKs
+        if: env.exit == 0
         run: |
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
           mkdir -p out
-          cp MEELANO-Android/app/build/outputs/apk/tax/release/*.apk \
+          cp "$PROJECT_DIR/app/build/outputs/apk/tax/release/"*.apk \
              "out/MEELANO-Tax-v$APP_VERSION-release.apk"
-          cp MEELANO-Android/app/build/outputs/apk/tax/debug/*.apk \
+          cp "$PROJECT_DIR/app/build/outputs/apk/tax/debug/"*.apk \
              "out/MEELANO-Tax-v$APP_VERSION-debug.apk"
 
           for f in out/*.apk; do
@@ -133,13 +158,14 @@ jobs:
           ls -la out
 
       - uses: actions/upload-artifact@v4
+        if: env.exit == 0
         with:
           name: MEELANO-Tax-APK-v${{ env.APP_VERSION }}
           path: out/*.apk
           retention-days: 14
 
       - name: Commit APK to branch
-        if: github.event_name == 'push'
+        if: env.exit == 0 && github.event_name == 'push'
         run: |
           mkdir -p apk
           cp out/MEELANO-Tax-v$APP_VERSION-release.apk apk/
@@ -155,7 +181,7 @@ jobs:
           git add apk/MEELANO-Tax-v$APP_VERSION-release.apk \
                   apk/MEELANO-Tax-v$APP_VERSION-debug.apk \
                   apk/latest-tax.json
-          git commit -m "Build Tax APK v$APP_VERSION [skip ci]" || echo "No changes"
+          git commit -m "Build Tax APK v$APP_VERSION [skip ci]" || echo "No changes to commit"
           for i in 1 2 3; do
             git pull --rebase origin "${GITHUB_REF_NAME}" && \
               git push origin HEAD:${GITHUB_REF_NAME} && break
@@ -163,6 +189,7 @@ jobs:
           done
 
       - name: Publish GitHub Release
+        if: env.exit == 0
         uses: softprops/action-gh-release@v2
         with:
           tag_name: tax-v${{ env.APP_VERSION }}-build-${{ github.run_number }}
