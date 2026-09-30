@@ -38,33 +38,58 @@ jobs:
       - name: Locate Android source
         id: src
         run: |
-          # این repository کد منبع را در پوشه extracted/MEELANO-Android/ نگه می‌دارد.
-          # ابتدا بررسی می‌کنیم آیا فایل ZIP جداگانه‌ای برای استفاده وجود دارد.
+          set +e  # allow commands to fail without exiting
+          echo "=== Current working directory ==="
+          pwd
+          echo "=== Top-level contents ==="
+          ls -la
+          echo "=== Looking for Android source ==="
+
+          PROJECT_DIR=""
+
+          # Try 1: a fresh zip uploaded alongside the workflow source.
           ZIP=$(ls MEELANO-Android-*.zip 2>/dev/null | head -1 || true)
           if [ -n "$ZIP" ]; then
-            echo "Using uploaded zip: $ZIP"
+            echo "Found uploaded zip: $ZIP"
             rm -rf MEELANO-Android
             unzip -q -o "$ZIP"
             PROJECT_DIR="MEELANO-Android"
-          elif [ -d "extracted/MEELANO-Android" ]; then
-            echo "Using extracted/MEELANO-Android/ from the repo"
+          fi
+
+          # Try 2: source kept inside extracted/MEELANO-Android/ (this repo).
+          if [ -z "$PROJECT_DIR" ] && [ -d "extracted/MEELANO-Android/app" ]; then
+            echo "Found extracted/MEELANO-Android/app"
             PROJECT_DIR="extracted/MEELANO-Android"
-          elif [ -d "MEELANO-Android" ]; then
-            echo "Using MEELANO-Android/ from the repo"
+          fi
+
+          # Try 3: source at repo root in MEELANO-Android/.
+          if [ -z "$PROJECT_DIR" ] && [ -d "MEELANO-Android/app" ]; then
+            echo "Found MEELANO-Android/app"
             PROJECT_DIR="MEELANO-Android"
-          else
-            echo "❌ ERROR: No Android source found!"
-            echo "Expected one of:"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::No Android source found!"
+            echo "Looked for:"
             echo "  - MEELANO-Android-*.zip in repo root"
-            echo "  - extracted/MEELANO-Android/"
-            echo "  - MEELANO-Android/"
-            ls -la
+            echo "  - extracted/MEELANO-Android/app"
+            echo "  - MEELANO-Android/app"
+            echo "Directory listing:"
+            find . -maxdepth 3 -type d | head -50
             exit 1
           fi
+
+          echo "Using PROJECT_DIR=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" "$PROJECT_DIR/app/build.gradle")
-          CODE=$(grep -oP "versionCode\s+\K[0-9]+" "$PROJECT_DIR/app/build.gradle")
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "::error::$PROJECT_DIR/app/build.gradle not found!"
+            ls -la "$PROJECT_DIR" || true
+            exit 1
+          fi
+
+          VERSION=$(grep -oP "versionName\s+'\K[0-9.]+" "$PROJECT_DIR/app/build.gradle" || echo "0.0.0")
+          CODE=$(grep -oP "versionCode\s+\K[0-9]+" "$PROJECT_DIR/app/build.gradle" || echo "0")
           echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "APP_CODE=$CODE" >> "$GITHUB_ENV"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
